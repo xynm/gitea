@@ -1,7 +1,7 @@
 
 ###################################
 #Build stage
-FROM golang:1.16-alpine3.13 AS build-env
+FROM golang:1.17-alpine3.13 AS build-env
 
 ARG GOPROXY
 ENV GOPROXY ${GOPROXY:-direct}
@@ -53,7 +53,7 @@ RUN addgroup \
     -u 1000 \
     -G git \
     git && \
-  echo "git:$(dd if=/dev/urandom bs=24 count=1 status=none | base64)" | chpasswd
+  echo "git:*" | chpasswd -e
 
 ENV USER git
 ENV GITEA_CUSTOM /data/gitea

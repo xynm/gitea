@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/modules/graceful"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/queue"
@@ -115,7 +116,13 @@ func Init() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	graceful.GetManager().RunAtTerminate(ctx, func() {
+	graceful.GetManager().RunAtTerminate(func() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		cancel()
 		log.Debug("Closing repository indexer")
 		indexer.Close()
 		log.Info("PID: %d Repository Indexer closed", os.Getpid())
@@ -279,7 +286,7 @@ func UpdateRepoIndexer(repo *models.Repository) {
 func populateRepoIndexer(ctx context.Context) {
 	log.Info("Populating the repo indexer with existing repositories")
 
-	exist, err := models.IsTableNotEmpty("repository")
+	exist, err := db.IsTableNotEmpty("repository")
 	if err != nil {
 		log.Fatal("System error: %v", err)
 	} else if !exist {
@@ -289,12 +296,12 @@ func populateRepoIndexer(ctx context.Context) {
 	// if there is any existing repo indexer metadata in the DB, delete it
 	// since we are starting afresh. Also, xorm requires deletes to have a
 	// condition, and we want to delete everything, thus 1=1.
-	if err := models.DeleteAllRecords("repo_indexer_status"); err != nil {
+	if err := db.DeleteAllRecords("repo_indexer_status"); err != nil {
 		log.Fatal("System error: %v", err)
 	}
 
 	var maxRepoID int64
-	if maxRepoID, err = models.GetMaxID("repository"); err != nil {
+	if maxRepoID, err = db.GetMaxID("repository"); err != nil {
 		log.Fatal("System error: %v", err)
 	}
 

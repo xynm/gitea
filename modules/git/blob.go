@@ -9,7 +9,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"io"
-	"io/ioutil"
+
+	"code.gitea.io/gitea/modules/typesniffer"
 )
 
 // This file contains common functions between the gogit and !gogit variants for git Blobs
@@ -32,7 +33,7 @@ func (b *Blob) GetBlobContent() (string, error) {
 	return string(buf), nil
 }
 
-// GetBlobLineCount gets line count of lob as raw text
+// GetBlobLineCount gets line count of the blob
 func (b *Blob) GetBlobLineCount() (int, error) {
 	reader, err := b.DataAsync()
 	if err != nil {
@@ -40,10 +41,14 @@ func (b *Blob) GetBlobLineCount() (int, error) {
 	}
 	defer reader.Close()
 	buf := make([]byte, 32*1024)
-	count := 0
+	count := 1
 	lineSep := []byte{'\n'}
+
+	c, err := reader.Read(buf)
+	if c == 0 && err == io.EOF {
+		return 0, nil
+	}
 	for {
-		c, err := reader.Read(buf)
 		count += bytes.Count(buf[:c], lineSep)
 		switch {
 		case err == io.EOF:
@@ -51,6 +56,7 @@ func (b *Blob) GetBlobLineCount() (int, error) {
 		case err != nil:
 			return count, err
 		}
+		c, err = reader.Read(buf)
 	}
 }
 
@@ -76,9 +82,20 @@ func (b *Blob) GetBlobContentBase64() (string, error) {
 		}
 	}()
 
-	out, err := ioutil.ReadAll(pr)
+	out, err := io.ReadAll(pr)
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// GuessContentType guesses the content type of the blob.
+func (b *Blob) GuessContentType() (typesniffer.SniffedType, error) {
+	r, err := b.DataAsync()
+	if err != nil {
+		return typesniffer.SniffedType{}, err
+	}
+	defer r.Close()
+
+	return typesniffer.DetectContentTypeFromReader(r)
 }

@@ -7,11 +7,12 @@ package repository
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/util"
@@ -22,15 +23,67 @@ import (
 func getHookTemplates() (hookNames, hookTpls, giteaHookTpls []string) {
 	hookNames = []string{"pre-receive", "update", "post-receive"}
 	hookTpls = []string{
-		fmt.Sprintf("#!/usr/bin/env %s\ndata=$(cat)\nexitcodes=\"\"\nhookname=$(basename $0)\nGIT_DIR=${GIT_DIR:-$(dirname $0)}\n\nfor hook in ${GIT_DIR}/hooks/${hookname}.d/*; do\ntest -x \"${hook}\" && test -f \"${hook}\" || continue\necho \"${data}\" | \"${hook}\"\nexitcodes=\"${exitcodes} $?\"\ndone\n\nfor i in ${exitcodes}; do\n[ ${i} -eq 0 ] || exit ${i}\ndone\n", setting.ScriptType),
-		fmt.Sprintf("#!/usr/bin/env %s\nexitcodes=\"\"\nhookname=$(basename $0)\nGIT_DIR=${GIT_DIR:-$(dirname $0)}\n\nfor hook in ${GIT_DIR}/hooks/${hookname}.d/*; do\ntest -x \"${hook}\" && test -f \"${hook}\" || continue\n\"${hook}\" $1 $2 $3\nexitcodes=\"${exitcodes} $?\"\ndone\n\nfor i in ${exitcodes}; do\n[ ${i} -eq 0 ] || exit ${i}\ndone\n", setting.ScriptType),
-		fmt.Sprintf("#!/usr/bin/env %s\ndata=$(cat)\nexitcodes=\"\"\nhookname=$(basename $0)\nGIT_DIR=${GIT_DIR:-$(dirname $0)}\n\nfor hook in ${GIT_DIR}/hooks/${hookname}.d/*; do\ntest -x \"${hook}\" && test -f \"${hook}\" || continue\necho \"${data}\" | \"${hook}\"\nexitcodes=\"${exitcodes} $?\"\ndone\n\nfor i in ${exitcodes}; do\n[ ${i} -eq 0 ] || exit ${i}\ndone\n", setting.ScriptType),
+		fmt.Sprintf(`#!/usr/bin/env %s
+data=$(cat)
+exitcodes=""
+hookname=$(basename $0)
+GIT_DIR=${GIT_DIR:-$(dirname $0)/..}
+
+for hook in ${GIT_DIR}/hooks/${hookname}.d/*; do
+test -x "${hook}" && test -f "${hook}" || continue
+echo "${data}" | "${hook}"
+exitcodes="${exitcodes} $?"
+done
+
+for i in ${exitcodes}; do
+[ ${i} -eq 0 ] || exit ${i}
+done
+`, setting.ScriptType),
+		fmt.Sprintf(`#!/usr/bin/env %s
+exitcodes=""
+hookname=$(basename $0)
+GIT_DIR=${GIT_DIR:-$(dirname $0/..)}
+
+for hook in ${GIT_DIR}/hooks/${hookname}.d/*; do
+test -x "${hook}" && test -f "${hook}" || continue
+"${hook}" $1 $2 $3
+exitcodes="${exitcodes} $?"
+done
+
+for i in ${exitcodes}; do
+[ ${i} -eq 0 ] || exit ${i}
+done
+`, setting.ScriptType),
+		fmt.Sprintf(`#!/usr/bin/env %s
+data=$(cat)
+exitcodes=""
+hookname=$(basename $0)
+GIT_DIR=${GIT_DIR:-$(dirname $0)/..}
+
+for hook in ${GIT_DIR}/hooks/${hookname}.d/*; do
+test -x "${hook}" && test -f "${hook}" || continue
+echo "${data}" | "${hook}"
+exitcodes="${exitcodes} $?"
+done
+
+for i in ${exitcodes}; do
+[ ${i} -eq 0 ] || exit ${i}
+done
+`, setting.ScriptType),
 	}
 	giteaHookTpls = []string{
 		fmt.Sprintf("#!/usr/bin/env %s\n%s hook --config=%s pre-receive\n", setting.ScriptType, util.ShellEscape(setting.AppPath), util.ShellEscape(setting.CustomConf)),
 		fmt.Sprintf("#!/usr/bin/env %s\n%s hook --config=%s update $1 $2 $3\n", setting.ScriptType, util.ShellEscape(setting.AppPath), util.ShellEscape(setting.CustomConf)),
 		fmt.Sprintf("#!/usr/bin/env %s\n%s hook --config=%s post-receive\n", setting.ScriptType, util.ShellEscape(setting.AppPath), util.ShellEscape(setting.CustomConf)),
 	}
+
+	if git.SupportProcReceive {
+		hookNames = append(hookNames, "proc-receive")
+		hookTpls = append(hookTpls,
+			fmt.Sprintf("#!/usr/bin/env %s\n%s hook --config=%s proc-receive\n", setting.ScriptType, util.ShellEscape(setting.AppPath), util.ShellEscape(setting.CustomConf)))
+		giteaHookTpls = append(giteaHookTpls, "")
+	}
+
 	return
 }
 
@@ -56,7 +109,7 @@ func createDelegateHooks(repoPath string) (err error) {
 		if err = util.Remove(oldHookPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("unable to pre-remove old hook file '%s' prior to rewriting: %v ", oldHookPath, err)
 		}
-		if err = ioutil.WriteFile(oldHookPath, []byte(hookTpls[i]), 0777); err != nil {
+		if err = os.WriteFile(oldHookPath, []byte(hookTpls[i]), 0777); err != nil {
 			return fmt.Errorf("write old hook file '%s': %v", oldHookPath, err)
 		}
 
@@ -67,7 +120,7 @@ func createDelegateHooks(repoPath string) (err error) {
 		if err = util.Remove(newHookPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("unable to pre-remove new hook file '%s' prior to rewriting: %v", newHookPath, err)
 		}
-		if err = ioutil.WriteFile(newHookPath, []byte(giteaHookTpls[i]), 0777); err != nil {
+		if err = os.WriteFile(newHookPath, []byte(giteaHookTpls[i]), 0777); err != nil {
 			return fmt.Errorf("write new hook file '%s': %v", newHookPath, err)
 		}
 
@@ -138,7 +191,7 @@ func CheckDelegateHooks(repoPath string) ([]string, error) {
 		if cont {
 			continue
 		}
-		contents, err := ioutil.ReadFile(oldHookPath)
+		contents, err := os.ReadFile(oldHookPath)
 		if err != nil {
 			return results, err
 		}
@@ -148,7 +201,7 @@ func CheckDelegateHooks(repoPath string) ([]string, error) {
 		if !checkExecutable(oldHookPath) {
 			results = append(results, fmt.Sprintf("old hook file %s is not executable", oldHookPath))
 		}
-		contents, err = ioutil.ReadFile(newHookPath)
+		contents, err = os.ReadFile(newHookPath)
 		if err != nil {
 			return results, err
 		}
@@ -167,8 +220,8 @@ func CheckDelegateHooks(repoPath string) ([]string, error) {
 func SyncRepositoryHooks(ctx context.Context) error {
 	log.Trace("Doing: SyncRepositoryHooks")
 
-	if err := models.Iterate(
-		models.DefaultDBContext(),
+	if err := db.Iterate(
+		db.DefaultContext,
 		new(models.Repository),
 		builder.Gt{"id": 0},
 		func(idx int, bean interface{}) error {

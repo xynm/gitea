@@ -14,8 +14,6 @@ else
 
 # This is the "normal" part of the Makefile
 
-TAR := $(shell hash bsdtar > /dev/null 2>&1 && echo "bsdtar --no-xattrs" || echo "tar" )
-
 DIST := dist
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
 IMPORT := code.gitea.io/gitea
@@ -26,9 +24,9 @@ SHASUM ?= shasum -a 256
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 COMMA := ,
 
-XGO_VERSION := go-1.16.x
-MIN_GO_VERSION := 001014000
-MIN_NODE_VERSION := 010013000
+XGO_VERSION := go-1.17.x
+MIN_GO_VERSION := 001016000
+MIN_NODE_VERSION := 012017000
 
 DOCKER_IMAGE ?= gitea/gitea
 DOCKER_TAG ?= latest
@@ -43,6 +41,9 @@ ifeq ($(HAS_GO), GO)
 endif
 
 ifeq ($(OS), Windows_NT)
+	GOFLAGS := -v -buildmode=exe
+	EXECUTABLE ?= gitea.exe
+else ifeq ($(OS), Windows)
 	GOFLAGS := -v -buildmode=exe
 	EXECUTABLE ?= gitea.exe
 else
@@ -63,8 +64,9 @@ EXTRA_GOFLAGS ?=
 MAKE_VERSION := $(shell $(MAKE) -v | head -n 1)
 MAKE_EVIDENCE_DIR := .make_evidence
 
-ifneq ($(RACE_ENABLED),)
-	GOTESTFLAGS ?= -race
+ifeq ($(RACE_ENABLED),true)
+	GOFLAGS += -race
+	GOTESTFLAGS += -race
 endif
 
 STORED_VERSION_FILE := VERSION
@@ -76,7 +78,7 @@ else
 	ifneq ($(DRONE_BRANCH),)
 		VERSION ?= $(subst release/v,,$(DRONE_BRANCH))
 	else
-		VERSION ?= master
+		VERSION ?= main
 	endif
 
 	STORED_VERSION=$(shell cat $(STORED_VERSION_FILE) 2>/dev/null)
@@ -93,8 +95,6 @@ LINUX_ARCHS ?= linux/amd64,linux/386,linux/arm-5,linux/arm-6,linux/arm64
 
 GO_PACKAGES ?= $(filter-out code.gitea.io/gitea/models/migrations code.gitea.io/gitea/integrations/migration-test code.gitea.io/gitea/integrations,$(shell $(GO) list -mod=vendor ./... | grep -v /vendor/))
 
-FOMANTIC_CONFIGS := semantic.json web_src/fomantic/theme.config.less web_src/fomantic/_site/globals/site.variables
-FOMANTIC_DEST := web_src/fomantic/build/semantic.js web_src/fomantic/build/semantic.css
 FOMANTIC_WORK_DIR := web_src/fomantic
 
 WEBPACK_SOURCES := $(shell find web_src/js web_src/less -type f)
@@ -114,6 +114,8 @@ TAGS_SPLIT := $(subst $(COMMA), ,$(TAGS))
 TAGS_EVIDENCE := $(MAKE_EVIDENCE_DIR)/tags
 
 TEST_TAGS ?= sqlite sqlite_unlock_notify
+
+TAR_EXCLUDES := .git data indexers queues log node_modules $(EXECUTABLE) $(FOMANTIC_WORK_DIR)/node_modules $(DIST) $(MAKE_EVIDENCE_DIR) $(AIR_TMP_DIR)
 
 GO_DIRS := cmd integrations models modules routers build services vendor tools
 
@@ -173,6 +175,9 @@ help:
 	@echo " - checks                           run various consistency checks"
 	@echo " - checks-frontend                  check frontend files"
 	@echo " - checks-backend                   check backend files"
+	@echo " - test                             test everything"
+	@echo " - test-frontend                    test frontend files"
+	@echo " - test-backend                     test backend files"
 	@echo " - webpack                          build webpack files"
 	@echo " - svg                              build svg files"
 	@echo " - fomantic                         build fomantic files"
@@ -195,7 +200,7 @@ help:
 go-check:
 	$(eval GO_VERSION := $(shell printf "%03d%03d%03d" $(shell $(GO) version | grep -Eo '[0-9]+\.[0-9.]+' | tr '.' ' ');))
 	@if [ "$(GO_VERSION)" -lt "$(MIN_GO_VERSION)" ]; then \
-		echo "Gitea requires Go 1.14 or greater to build. You can get it at https://golang.org/dl/"; \
+		echo "Gitea requires Go 1.16 or greater to build. You can get it at https://golang.org/dl/"; \
 		exit 1; \
 	fi
 
@@ -209,15 +214,16 @@ git-check:
 .PHONY: node-check
 node-check:
 	$(eval NODE_VERSION := $(shell printf "%03d%03d%03d" $(shell node -v | cut -c2- | tr '.' ' ');))
+	$(eval MIN_NODE_VER_FMT := $(shell printf "%g.%g.%g" $(shell echo $(MIN_NODE_VERSION) | grep -o ...)))
 	$(eval NPM_MISSING := $(shell hash npm > /dev/null 2>&1 || echo 1))
 	@if [ "$(NODE_VERSION)" -lt "$(MIN_NODE_VERSION)" -o "$(NPM_MISSING)" = "1" ]; then \
-		echo "Gitea requires Node.js 10 or greater and npm to build. You can get it at https://nodejs.org/en/download/"; \
+		echo "Gitea requires Node.js $(MIN_NODE_VER_FMT) or greater and npm to build. You can get it at https://nodejs.org/en/download/"; \
 		exit 1; \
 	fi
 
 .PHONY: clean-all
 clean-all: clean
-	rm -rf $(WEBPACK_DEST_ENTRIES)
+	rm -rf $(WEBPACK_DEST_ENTRIES) node_modules
 
 .PHONY: clean
 clean:
@@ -273,27 +279,30 @@ swagger-validate:
 .PHONY: errcheck
 errcheck:
 	@hash errcheck > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		GO111MODULE=off $(GO) get -u github.com/kisielk/errcheck; \
+		$(GO) install github.com/kisielk/errcheck@8ddee489636a8311a376fc92e27a6a13c6658344; \
 	fi
 	@echo "Running errcheck..."
 	@errcheck $(GO_PACKAGES)
 
 .PHONY: revive
 revive:
-	GO111MODULE=on $(GO) run -mod=vendor build/lint.go -config .revive.toml -exclude=./vendor/... ./... || exit 1
+	@hash revive > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
+		$(GO) install github.com/mgechev/revive@v1.1.2; \
+	fi
+	@revive -config .revive.toml -exclude=./vendor/... ./...
 
 .PHONY: misspell-check
 misspell-check:
 	@hash misspell > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		GO111MODULE=off $(GO) get -u github.com/client9/misspell/cmd/misspell; \
+		$(GO) install github.com/client9/misspell/cmd/misspell@v0.3.4; \
 	fi
 	@echo "Running misspell-check..."
-	@misspell -error -i unknwon,destory $(GO_SOURCES_OWN)
+	@misspell -error -i unknwon $(GO_SOURCES_OWN)
 
 .PHONY: misspell
 misspell:
 	@hash misspell > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		GO111MODULE=off $(GO) get -u github.com/client9/misspell/cmd/misspell; \
+		$(GO) install github.com/client9/misspell/cmd/misspell@v0.3.4; \
 	fi
 	@echo "Running go misspell..."
 	@misspell -w -i unknwon $(GO_SOURCES_OWN)
@@ -322,8 +331,9 @@ lint: lint-frontend lint-backend
 
 .PHONY: lint-frontend
 lint-frontend: node_modules
-	npx eslint --color --max-warnings=0 web_src/js build templates webpack.config.js
+	npx eslint --color --max-warnings=0 web_src/js build templates *.config.js
 	npx stylelint --color --max-warnings=0 web_src/less
+	npx editorconfig-checker templates
 
 .PHONY: lint-backend
 lint-backend: golangci-lint revive vet
@@ -340,21 +350,28 @@ watch-frontend: node-check node_modules
 .PHONY: watch-backend
 watch-backend: go-check
 	@hash air > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		GO111MODULE=off $(GO) get -u github.com/cosmtrek/air; \
+		$(GO) install github.com/cosmtrek/air@bedc18201271882c2be66d216d0e1a275b526ec4; \
 	fi
 	air -c .air.conf
 
 .PHONY: test
-test:
-	@echo "Running go test with -tags '$(TEST_TAGS)'..."
+test: test-frontend test-backend
+
+.PHONY: test-backend
+test-backend:
+	@echo "Running go test with $(GOTESTFLAGS) -tags '$(TEST_TAGS)'..."
 	@$(GO) test $(GOTESTFLAGS) -mod=vendor -tags='$(TEST_TAGS)' $(GO_PACKAGES)
+
+.PHONY: test-frontend
+test-frontend: node_modules
+	@NODE_OPTIONS="--experimental-vm-modules --no-warnings" npx jest --color
 
 .PHONY: test-check
 test-check:
 	@echo "Running test-check...";
 	@diff=$$(git status -s); \
 	if [ -n "$$diff" ]; then \
-		echo "make test has changed files in the source tree:"; \
+		echo "make test-backend has changed files in the source tree:"; \
 		echo "$${diff}"; \
 		echo "You should change the tests to create these files in a temporary directory."; \
 		echo "Do not simply add these files to .gitignore"; \
@@ -364,15 +381,17 @@ test-check:
 .PHONY: test\#%
 test\#%:
 	@echo "Running go test with -tags '$(TEST_TAGS)'..."
-	@$(GO) test -mod=vendor -tags='$(TEST_TAGS)' -run $(subst .,/,$*) $(GO_PACKAGES)
+	@$(GO) test -mod=vendor $(GOTESTFLAGS) -tags='$(TEST_TAGS)' -run $(subst .,/,$*) $(GO_PACKAGES)
 
 .PHONY: coverage
 coverage:
-	GO111MODULE=on $(GO) run -mod=vendor build/gocovmerge.go integration.coverage.out $(shell find . -type f -name "coverage.out") > coverage.all
+	grep '^\(mode: .*\)\|\(.*:[0-9]\+\.[0-9]\+,[0-9]\+\.[0-9]\+ [0-9]\+ [0-9]\+\)$$' coverage.out > coverage-bodged.out
+	grep '^\(mode: .*\)\|\(.*:[0-9]\+\.[0-9]\+,[0-9]\+\.[0-9]\+ [0-9]\+ [0-9]\+\)$$' integration.coverage.out > integration.coverage-bodged.out
+	GO111MODULE=on $(GO) run -mod=vendor build/gocovmerge.go integration.coverage-bodged.out coverage-bodged.out > coverage.all || (echo "gocovmerge failed"; echo "integration.coverage.out"; cat integration.coverage.out; echo "coverage.out"; cat coverage.out; exit 1)
 
 .PHONY: unit-test-coverage
 unit-test-coverage:
-	@echo "Running unit-test-coverage -tags '$(TEST_TAGS)'..."
+	@echo "Running unit-test-coverage $(GOTESTFLAGS) -tags '$(TEST_TAGS)'..."
 	@$(GO) test $(GOTESTFLAGS) -mod=vendor -tags='$(TEST_TAGS)' -cover -coverprofile coverage.out $(GO_PACKAGES) && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: vendor
@@ -579,7 +598,7 @@ install: $(wildcard *.go)
 build: frontend backend
 
 .PHONY: frontend
-frontend: node-check $(WEBPACK_DEST)
+frontend: $(WEBPACK_DEST)
 
 .PHONY: backend
 backend: go-check generate $(EXECUTABLE)
@@ -604,6 +623,9 @@ release-windows: | $(DIST_DIRS)
 		$(GO) install src.techknowlogick.com/xgo@latest; \
 	fi
 	CGO_CFLAGS="$(CGO_CFLAGS)" xgo -go $(XGO_VERSION) -buildmode exe -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-linkmode external -extldflags "-static" $(LDFLAGS)' -targets 'windows/*' -out gitea-$(VERSION) .
+ifeq (,$(findstring gogit,$(TAGS)))
+	CGO_CFLAGS="$(CGO_CFLAGS)" xgo -go $(XGO_VERSION) -buildmode exe -dest $(DIST)/binaries -tags 'netgo osusergo gogit $(TAGS)' -ldflags '-linkmode external -extldflags "-static" $(LDFLAGS)' -targets 'windows/*' -out gitea-$(VERSION)-gogit .
+endif
 ifeq ($(CI),drone)
 	cp /build/* $(DIST)/binaries
 endif
@@ -639,21 +661,21 @@ release-check: | $(DIST_DIRS)
 .PHONY: release-compress
 release-compress: | $(DIST_DIRS)
 	@hash gxz > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		GO111MODULE=off $(GO) get -u github.com/ulikunitz/xz/cmd/gxz; \
+		$(GO) install github.com/ulikunitz/xz/cmd/gxz@v0.5.10; \
 	fi
 	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "compressing $${file}" && gxz -k -9 $${file}; done;
 
 .PHONY: release-sources
-release-sources: | $(DIST_DIRS) npm-cache
+release-sources: | $(DIST_DIRS)
 	echo $(VERSION) > $(STORED_VERSION_FILE)
-	$(eval EXCL := --exclude=$(shell [ ! "$(TAR)" = "tar" ] && echo "^" )./)
-	$(eval EXCL_RECURSIVE := --exclude=)
-	$(TAR) $(EXCL)$(DIST) $(EXCL).git $(EXCL)$(MAKE_EVIDENCE_DIR) $(EXCL_RECURSIVE)node_modules $(EXCL)$(AIR_TMP_DIR) -czf $(DIST)/release/gitea-src-$(VERSION).tar.gz .
+# bsdtar needs a ^ to prevent matching subdirectories
+	$(eval EXCL := --exclude=$(shell tar --help | grep -q bsdtar && echo "^")./)
+	tar $(addprefix $(EXCL),$(TAR_EXCLUDES)) -czf $(DIST)/release/gitea-src-$(VERSION).tar.gz .
 	rm -f $(STORED_VERSION_FILE)
 
 .PHONY: release-docs
 release-docs: | $(DIST_DIRS) docs
-	$(TAR) -czf $(DIST)/release/gitea-docs-$(VERSION).tar.gz -C ./docs/public .
+	tar -czf $(DIST)/release/gitea-docs-$(VERSION).tar.gz -C ./docs/public .
 
 .PHONY: docs
 docs:
@@ -666,25 +688,6 @@ node_modules: package-lock.json
 	npm install --no-save
 	@touch node_modules
 
-.PHONY: npm-cache
-npm-cache: .npm-cache $(FOMANTIC_WORK_DIR)/node_modules/fomantic-ui
-
-.npm-cache: package-lock.json
-	rm -rf .npm-cache
-	$(eval ESBUILD_VERSION := $(shell node -p "require('./package-lock.json').dependencies.esbuild.version"))
-	npm config --userconfig=.npmrc set cache=.npm-cache
-	rm -rf node_modules && npm install --no-save
-	npm config --userconfig=$(FOMANTIC_WORK_DIR)/.npmrc set cache=../../.npm-cache
-	echo $(foreach build, darwin-64 $(foreach arch,arm arm64 32 64,linux-${arch}) $(foreach arch,32 64,windows-${arch}), esbuild-${build}@$(ESBUILD_VERSION)) | tr " " "\n" | xargs -n 1 -P 4 npm cache add
-	rm -rf $(FOMANTIC_WORK_DIR)/node_modules
-	@touch .npm-cache
-
-.PHONY: npm-uncache
-npm-uncache:
-	rm -rf .npm-cache
-	npm config --userconfig=$(FOMANTIC_WORK_DIR)/.npmrc rm cache
-	npm config --userconfig=.npmrc rm cache
-
 .PHONY: npm-update
 npm-update: node-check | node_modules
 	npx updates -cu
@@ -693,30 +696,20 @@ npm-update: node-check | node_modules
 	@touch node_modules
 
 .PHONY: fomantic
-fomantic: $(FOMANTIC_DEST)
-
-$(FOMANTIC_WORK_DIR)/node_modules/fomantic-ui:
-	ln -sf ../../semantic.json $(FOMANTIC_WORK_DIR)
-	cd $(FOMANTIC_WORK_DIR); \
-		rm -rf node_modules && mkdir node_modules && \
-		npm install fomantic-ui; \
-		rm -f semantic.json
-	@touch $(FOMANTIC_WORK_DIR)/node_modules
-
-$(FOMANTIC_DEST): $(FOMANTIC_CONFIGS) $(FOMANTIC_WORK_DIR)/node_modules/fomantic-ui
-	ln -sf ../../semantic.json $(FOMANTIC_WORK_DIR)
+fomantic:
 	rm -rf $(FOMANTIC_WORK_DIR)/build
-	cd $(FOMANTIC_WORK_DIR); \
-		cp -f theme.config.less node_modules/fomantic-ui/src/theme.config; \
-		cp -rf _site node_modules/fomantic-ui/src/; \
-		npx gulp -f node_modules/fomantic-ui/gulpfile.js build; \
-		rm -f semantic.json
-	@touch $(FOMANTIC_DEST)
+	cd $(FOMANTIC_WORK_DIR) && npm install --no-save
+	cp -f $(FOMANTIC_WORK_DIR)/theme.config.less $(FOMANTIC_WORK_DIR)/node_modules/fomantic-ui/src/theme.config
+	cp -rf $(FOMANTIC_WORK_DIR)/_site $(FOMANTIC_WORK_DIR)/node_modules/fomantic-ui/src/
+	cp -f web_src/js/vendor/dropdown.js $(FOMANTIC_WORK_DIR)/node_modules/fomantic-ui/src/definitions/modules
+	cd $(FOMANTIC_WORK_DIR) && npx gulp -f node_modules/fomantic-ui/gulpfile.js build
+	rm -f $(FOMANTIC_WORK_DIR)/build/*.min.*
 
 .PHONY: webpack
 webpack: $(WEBPACK_DEST)
 
-$(WEBPACK_DEST): $(WEBPACK_SOURCES) $(WEBPACK_CONFIGS) package-lock.json | node_modules
+$(WEBPACK_DEST): $(WEBPACK_SOURCES) $(WEBPACK_CONFIGS) package-lock.json
+	@$(MAKE) -s node-check node_modules
 	rm -rf $(WEBPACK_DEST_ENTRIES)
 	npx webpack
 	@touch $(WEBPACK_DEST)
@@ -755,8 +748,8 @@ generate-gitignore:
 	GO111MODULE=on $(GO) run build/generate-gitignores.go
 
 .PHONY: generate-images
-generate-images:
-	npm install --no-save --no-package-lock fabric imagemin-zopfli
+generate-images: | node_modules
+	npm install --no-save --no-package-lock fabric@4 imagemin-zopfli@7
 	node build/generate-images.js $(TAGS)
 
 .PHONY: generate-manpage

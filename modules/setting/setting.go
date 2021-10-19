@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"net"
 	"net/url"
@@ -20,14 +19,15 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"code.gitea.io/gitea/modules/generate"
+	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/user"
 	"code.gitea.io/gitea/modules/util"
 
-	jsoniter "github.com/json-iterator/go"
 	shellquote "github.com/kballard/go-shellquote"
 	"github.com/unknwon/com"
 	gossh "golang.org/x/crypto/ssh"
@@ -117,48 +117,57 @@ var (
 	GracefulRestartable  bool
 	GracefulHammerTime   time.Duration
 	StartupTimeout       time.Duration
+	PerWriteTimeout      = 30 * time.Second
+	PerWritePerKbTimeout = 10 * time.Second
 	StaticURLPrefix      string
 	AbsoluteAssetURL     string
 
 	SSH = struct {
-		Disabled                       bool              `ini:"DISABLE_SSH"`
-		StartBuiltinServer             bool              `ini:"START_SSH_SERVER"`
-		BuiltinServerUser              string            `ini:"BUILTIN_SSH_SERVER_USER"`
-		Domain                         string            `ini:"SSH_DOMAIN"`
-		Port                           int               `ini:"SSH_PORT"`
-		ListenHost                     string            `ini:"SSH_LISTEN_HOST"`
-		ListenPort                     int               `ini:"SSH_LISTEN_PORT"`
-		RootPath                       string            `ini:"SSH_ROOT_PATH"`
-		ServerCiphers                  []string          `ini:"SSH_SERVER_CIPHERS"`
-		ServerKeyExchanges             []string          `ini:"SSH_SERVER_KEY_EXCHANGES"`
-		ServerMACs                     []string          `ini:"SSH_SERVER_MACS"`
-		ServerHostKeys                 []string          `ini:"SSH_SERVER_HOST_KEYS"`
-		KeyTestPath                    string            `ini:"SSH_KEY_TEST_PATH"`
-		KeygenPath                     string            `ini:"SSH_KEYGEN_PATH"`
-		AuthorizedKeysBackup           bool              `ini:"SSH_AUTHORIZED_KEYS_BACKUP"`
-		AuthorizedPrincipalsBackup     bool              `ini:"SSH_AUTHORIZED_PRINCIPALS_BACKUP"`
-		MinimumKeySizeCheck            bool              `ini:"-"`
-		MinimumKeySizes                map[string]int    `ini:"-"`
-		CreateAuthorizedKeysFile       bool              `ini:"SSH_CREATE_AUTHORIZED_KEYS_FILE"`
-		CreateAuthorizedPrincipalsFile bool              `ini:"SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE"`
-		ExposeAnonymous                bool              `ini:"SSH_EXPOSE_ANONYMOUS"`
-		AuthorizedPrincipalsAllow      []string          `ini:"SSH_AUTHORIZED_PRINCIPALS_ALLOW"`
-		AuthorizedPrincipalsEnabled    bool              `ini:"-"`
-		TrustedUserCAKeys              []string          `ini:"SSH_TRUSTED_USER_CA_KEYS"`
-		TrustedUserCAKeysFile          string            `ini:"SSH_TRUSTED_USER_CA_KEYS_FILENAME"`
-		TrustedUserCAKeysParsed        []gossh.PublicKey `ini:"-"`
+		Disabled                              bool               `ini:"DISABLE_SSH"`
+		StartBuiltinServer                    bool               `ini:"START_SSH_SERVER"`
+		BuiltinServerUser                     string             `ini:"BUILTIN_SSH_SERVER_USER"`
+		Domain                                string             `ini:"SSH_DOMAIN"`
+		Port                                  int                `ini:"SSH_PORT"`
+		ListenHost                            string             `ini:"SSH_LISTEN_HOST"`
+		ListenPort                            int                `ini:"SSH_LISTEN_PORT"`
+		RootPath                              string             `ini:"SSH_ROOT_PATH"`
+		ServerCiphers                         []string           `ini:"SSH_SERVER_CIPHERS"`
+		ServerKeyExchanges                    []string           `ini:"SSH_SERVER_KEY_EXCHANGES"`
+		ServerMACs                            []string           `ini:"SSH_SERVER_MACS"`
+		ServerHostKeys                        []string           `ini:"SSH_SERVER_HOST_KEYS"`
+		KeyTestPath                           string             `ini:"SSH_KEY_TEST_PATH"`
+		KeygenPath                            string             `ini:"SSH_KEYGEN_PATH"`
+		AuthorizedKeysBackup                  bool               `ini:"SSH_AUTHORIZED_KEYS_BACKUP"`
+		AuthorizedPrincipalsBackup            bool               `ini:"SSH_AUTHORIZED_PRINCIPALS_BACKUP"`
+		AuthorizedKeysCommandTemplate         string             `ini:"SSH_AUTHORIZED_KEYS_COMMAND_TEMPLATE"`
+		AuthorizedKeysCommandTemplateTemplate *template.Template `ini:"-"`
+		MinimumKeySizeCheck                   bool               `ini:"-"`
+		MinimumKeySizes                       map[string]int     `ini:"-"`
+		CreateAuthorizedKeysFile              bool               `ini:"SSH_CREATE_AUTHORIZED_KEYS_FILE"`
+		CreateAuthorizedPrincipalsFile        bool               `ini:"SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE"`
+		ExposeAnonymous                       bool               `ini:"SSH_EXPOSE_ANONYMOUS"`
+		AuthorizedPrincipalsAllow             []string           `ini:"SSH_AUTHORIZED_PRINCIPALS_ALLOW"`
+		AuthorizedPrincipalsEnabled           bool               `ini:"-"`
+		TrustedUserCAKeys                     []string           `ini:"SSH_TRUSTED_USER_CA_KEYS"`
+		TrustedUserCAKeysFile                 string             `ini:"SSH_TRUSTED_USER_CA_KEYS_FILENAME"`
+		TrustedUserCAKeysParsed               []gossh.PublicKey  `ini:"-"`
+		PerWriteTimeout                       time.Duration      `ini:"SSH_PER_WRITE_TIMEOUT"`
+		PerWritePerKbTimeout                  time.Duration      `ini:"SSH_PER_WRITE_PER_KB_TIMEOUT"`
 	}{
-		Disabled:            false,
-		StartBuiltinServer:  false,
-		Domain:              "",
-		Port:                22,
-		ServerCiphers:       []string{"aes128-ctr", "aes192-ctr", "aes256-ctr", "aes128-gcm@openssh.com", "arcfour256", "arcfour128"},
-		ServerKeyExchanges:  []string{"diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1", "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521", "curve25519-sha256@libssh.org"},
-		ServerMACs:          []string{"hmac-sha2-256-etm@openssh.com", "hmac-sha2-256", "hmac-sha1", "hmac-sha1-96"},
-		KeygenPath:          "ssh-keygen",
-		MinimumKeySizeCheck: true,
-		MinimumKeySizes:     map[string]int{"ed25519": 256, "ed25519-sk": 256, "ecdsa": 256, "ecdsa-sk": 256, "rsa": 2048},
-		ServerHostKeys:      []string{"ssh/gitea.rsa", "ssh/gogs.rsa"},
+		Disabled:                      false,
+		StartBuiltinServer:            false,
+		Domain:                        "",
+		Port:                          22,
+		ServerCiphers:                 []string{"aes128-ctr", "aes192-ctr", "aes256-ctr", "aes128-gcm@openssh.com", "arcfour256", "arcfour128"},
+		ServerKeyExchanges:            []string{"diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1", "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521", "curve25519-sha256@libssh.org"},
+		ServerMACs:                    []string{"hmac-sha2-256-etm@openssh.com", "hmac-sha2-256", "hmac-sha1", "hmac-sha1-96"},
+		KeygenPath:                    "ssh-keygen",
+		MinimumKeySizeCheck:           true,
+		MinimumKeySizes:               map[string]int{"ed25519": 256, "ed25519-sk": 256, "ecdsa": 256, "ecdsa-sk": 256, "rsa": 2048},
+		ServerHostKeys:                []string{"ssh/gitea.rsa", "ssh/gogs.rsa"},
+		AuthorizedKeysCommandTemplate: "{{.AppPath}} --config={{.CustomConf}} serv key-{{.Key.ID}}",
+		PerWriteTimeout:               PerWriteTimeout,
+		PerWritePerKbTimeout:          PerWritePerKbTimeout,
 	}
 
 	// Security settings
@@ -179,6 +188,7 @@ var (
 	PasswordComplexity                 []string
 	PasswordHashAlgo                   string
 	PasswordCheckPwn                   bool
+	SuccessfulTokensCacheSize          int
 
 	// UI settings
 	UI = struct {
@@ -198,7 +208,9 @@ var (
 		DefaultTheme          string
 		Themes                []string
 		Reactions             []string
-		ReactionsMap          map[string]bool
+		ReactionsMap          map[string]bool `ini:"-"`
+		CustomEmojis          []string
+		CustomEmojisMap       map[string]string `ini:"-"`
 		SearchRepoDescription bool
 		UseServiceWorker      bool
 
@@ -243,9 +255,11 @@ var (
 		ReactionMaxUserNum:  10,
 		ThemeColorMetaTag:   `#6cc644`,
 		MaxDisplayFileSize:  8388608,
-		DefaultTheme:        `gitea`,
-		Themes:              []string{`gitea`, `arc-green`},
+		DefaultTheme:        `auto`,
+		Themes:              []string{`auto`, `gitea`, `arc-green`},
 		Reactions:           []string{`+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`, `rocket`, `eyes`},
+		CustomEmojis:        []string{`git`, `gitea`, `codeberg`, `gitlab`, `github`, `gogs`},
+		CustomEmojisMap:     map[string]string{"git": ":git:", "gitea": ":gitea:", "codeberg": ":codeberg:", "gitlab": ":gitlab:", "github": ":github:", "gogs": ":gogs:"},
 		Notification: struct {
 			MinTimeout            time.Duration
 			TimeoutStep           time.Duration
@@ -318,8 +332,8 @@ var (
 	LogRootPath        string
 	DisableRouterLog   bool
 	RouterLogLevel     log.Level
-	RouterLogMode      string
 	EnableAccessLog    bool
+	EnableSSHLog       bool
 	AccessLogTemplate  string
 	EnableXORMLog      bool
 
@@ -332,12 +346,6 @@ var (
 	CSRFCookieHTTPOnly = true
 
 	ManifestData string
-
-	// Mirror settings
-	Mirror struct {
-		DefaultInterval time.Duration
-		MinInterval     time.Duration
-	}
 
 	// API settings
 	API = struct {
@@ -361,14 +369,17 @@ var (
 		AccessTokenExpirationTime  int64
 		RefreshTokenExpirationTime int64
 		InvalidateRefreshTokens    bool
-		JWTSecretBytes             []byte `ini:"-"`
+		JWTSigningAlgorithm        string `ini:"JWT_SIGNING_ALGORITHM"`
 		JWTSecretBase64            string `ini:"JWT_SECRET"`
+		JWTSigningPrivateKeyFile   string `ini:"JWT_SIGNING_PRIVATE_KEY_FILE"`
 		MaxTokenLength             int
 	}{
 		Enable:                     true,
 		AccessTokenExpirationTime:  3600,
 		RefreshTokenExpirationTime: 730,
 		InvalidateRefreshTokens:    false,
+		JWTSigningAlgorithm:        "RS256",
+		JWTSigningPrivateKeyFile:   "jwt/private.pem",
 		MaxTokenLength:             math.MaxInt16,
 	}
 
@@ -379,11 +390,15 @@ var (
 
 	// Metrics settings
 	Metrics = struct {
-		Enabled bool
-		Token   string
+		Enabled                  bool
+		Token                    string
+		EnabledIssueByLabel      bool
+		EnabledIssueByRepository bool
 	}{
-		Enabled: false,
-		Token:   "",
+		Enabled:                  false,
+		Token:                    "",
+		EnabledIssueByLabel:      false,
+		EnabledIssueByRepository: false,
 	}
 
 	// I18n settings
@@ -408,10 +423,6 @@ var (
 	IsWindows     bool
 	HasRobotsTxt  bool
 	InternalToken string // internal access token
-
-	// UILocation is the location on the UI, so that we can display the time on UI.
-	// Currently only show the default time.Local, it could be added to app.ini after UI is ready
-	UILocation = time.Local
 )
 
 // IsProd if it's a production mode
@@ -460,7 +471,8 @@ func getWorkPath(appPath string) string {
 func init() {
 	IsWindows = runtime.GOOS == "windows"
 	// We can rely on log.CanColorStdout being set properly because modules/log/console_windows.go comes before modules/setting/setting.go lexicographically
-	log.NewLogger(0, "console", "console", fmt.Sprintf(`{"level": "trace", "colorize": %t, "stacktraceLevel": "none"}`, log.CanColorStdout))
+	// By default set this logger at Info - we'll change it later but we need to start with something.
+	log.NewLogger(0, "console", "console", fmt.Sprintf(`{"level": "info", "colorize": %t, "stacktraceLevel": "none"}`, log.CanColorStdout))
 
 	var err error
 	if AppPath, err = getAppPath(); err != nil {
@@ -616,6 +628,8 @@ func NewContext() {
 	GracefulRestartable = sec.Key("ALLOW_GRACEFUL_RESTARTS").MustBool(true)
 	GracefulHammerTime = sec.Key("GRACEFUL_HAMMER_TIME").MustDuration(60 * time.Second)
 	StartupTimeout = sec.Key("STARTUP_TIMEOUT").MustDuration(0 * time.Second)
+	PerWriteTimeout = sec.Key("PER_WRITE_TIMEOUT").MustDuration(PerWriteTimeout)
+	PerWritePerKbTimeout = sec.Key("PER_WRITE_PER_KB_TIMEOUT").MustDuration(PerWritePerKbTimeout)
 
 	defaultAppURL := string(Protocol) + "://" + Domain
 	if (Protocol == HTTP && HTTPPort != "80") || (Protocol == HTTPS && HTTPPort != "443") {
@@ -753,7 +767,7 @@ func NewContext() {
 
 		if len(trustedUserCaKeys) > 0 && SSH.AuthorizedPrincipalsEnabled {
 			fname := sec.Key("SSH_TRUSTED_USER_CA_KEYS_FILENAME").MustString(filepath.Join(SSH.RootPath, "gitea-trusted-user-ca-keys.pem"))
-			if err := ioutil.WriteFile(fname,
+			if err := os.WriteFile(fname,
 				[]byte(strings.Join(trustedUserCaKeys, "\n")), 0600); err != nil {
 				log.Fatal("Failed to create '%s': %v", fname, err)
 			}
@@ -781,44 +795,20 @@ func NewContext() {
 	}
 
 	SSH.ExposeAnonymous = sec.Key("SSH_EXPOSE_ANONYMOUS").MustBool(false)
+	SSH.AuthorizedKeysCommandTemplate = sec.Key("SSH_AUTHORIZED_KEYS_COMMAND_TEMPLATE").MustString(SSH.AuthorizedKeysCommandTemplate)
+
+	SSH.AuthorizedKeysCommandTemplateTemplate = template.Must(template.New("").Parse(SSH.AuthorizedKeysCommandTemplate))
+
+	SSH.PerWriteTimeout = sec.Key("SSH_PER_WRITE_TIMEOUT").MustDuration(PerWriteTimeout)
+	SSH.PerWritePerKbTimeout = sec.Key("SSH_PER_WRITE_PER_KB_TIMEOUT").MustDuration(PerWritePerKbTimeout)
 
 	if err = Cfg.Section("oauth2").MapTo(&OAuth2); err != nil {
 		log.Fatal("Failed to OAuth2 settings: %v", err)
 		return
 	}
 
-	if OAuth2.Enable {
-		OAuth2.JWTSecretBytes = make([]byte, 32)
-		n, err := base64.RawURLEncoding.Decode(OAuth2.JWTSecretBytes, []byte(OAuth2.JWTSecretBase64))
-
-		if err != nil || n != 32 {
-			OAuth2.JWTSecretBase64, err = generate.NewJwtSecret()
-			if err != nil {
-				log.Fatal("error generating JWT secret: %v", err)
-				return
-			}
-			cfg := ini.Empty()
-			isFile, err := util.IsFile(CustomConf)
-			if err != nil {
-				log.Error("Unable to check if %s is a file. Error: %v", CustomConf, err)
-			}
-			if isFile {
-				if err := cfg.Append(CustomConf); err != nil {
-					log.Error("failed to load custom conf %s: %v", CustomConf, err)
-					return
-				}
-			}
-			cfg.Section("oauth2").Key("JWT_SECRET").SetValue(OAuth2.JWTSecretBase64)
-
-			if err := os.MkdirAll(filepath.Dir(CustomConf), os.ModePerm); err != nil {
-				log.Fatal("failed to create '%s': %v", CustomConf, err)
-				return
-			}
-			if err := cfg.SaveTo(CustomConf); err != nil {
-				log.Fatal("error saving generating JWT secret to custom config: %v", err)
-				return
-			}
-		}
+	if !filepath.IsAbs(OAuth2.JWTSigningPrivateKeyFile) {
+		OAuth2.JWTSigningPrivateKeyFile = filepath.Join(AppDataPath, OAuth2.JWTSigningPrivateKeyFile)
 	}
 
 	sec = Cfg.Section("admin")
@@ -848,6 +838,7 @@ func NewContext() {
 	PasswordHashAlgo = sec.Key("PASSWORD_HASH_ALGO").MustString("pbkdf2")
 	CSRFCookieHTTPOnly = sec.Key("CSRF_COOKIE_HTTP_ONLY").MustBool(true)
 	PasswordCheckPwn = sec.Key("PASSWORD_CHECK_PWN").MustBool(false)
+	SuccessfulTokensCacheSize = sec.Key("SUCCESSFUL_TOKENS_CACHE_SIZE").MustInt(20)
 
 	InternalToken = loadInternalToken(sec)
 
@@ -911,6 +902,9 @@ func NewContext() {
 	}
 
 	RunUser = Cfg.Section("").Key("RUN_USER").MustString(user.CurrentUsername())
+	// The following is a purposefully undocumented option. Please do not run Gitea as root. It will only cause future headaches.
+	// Please don't use root as a bandaid to "fix" something that is broken, instead the broken thing should instead be fixed properly.
+	unsafeAllowRunAsRoot := Cfg.Section("").Key("I_AM_BEING_UNSAFE_RUNNING_AS_ROOT").MustBool(false)
 	RunMode = Cfg.Section("").Key("RUN_MODE").MustString("prod")
 	// Does not check run user when the install lock is off.
 	if InstallLock {
@@ -918,6 +912,15 @@ func NewContext() {
 		if !match {
 			log.Fatal("Expect user '%s' but current user is: %s", RunUser, currentUser)
 		}
+	}
+
+	// check if we run as root
+	if os.Getuid() == 0 {
+		if !unsafeAllowRunAsRoot {
+			// Special thanks to VLC which inspired the wording of this messaging.
+			log.Fatal("Gitea is not supposed to be run as root. Sorry. If you need to use privileged TCP ports please instead use setcap and the `cap_net_bind_service` permission")
+		}
+		log.Critical("You are running Gitea using the root user, and have purposely chosen to skip built-in protections around this. You have been warned against this.")
 	}
 
 	SSH.BuiltinServerUser = Cfg.Section("server").Key("BUILTIN_SSH_SERVER_USER").MustString(RunUser)
@@ -944,31 +947,23 @@ func NewContext() {
 
 	newGit()
 
-	sec = Cfg.Section("mirror")
-	Mirror.MinInterval = sec.Key("MIN_INTERVAL").MustDuration(10 * time.Minute)
-	Mirror.DefaultInterval = sec.Key("DEFAULT_INTERVAL").MustDuration(8 * time.Hour)
-	if Mirror.MinInterval.Minutes() < 1 {
-		log.Warn("Mirror.MinInterval is too low")
-		Mirror.MinInterval = 1 * time.Minute
-	}
-	if Mirror.DefaultInterval < Mirror.MinInterval {
-		log.Warn("Mirror.DefaultInterval is less than Mirror.MinInterval")
-		Mirror.DefaultInterval = time.Hour * 8
-	}
+	newMirror()
 
 	Langs = Cfg.Section("i18n").Key("LANGS").Strings(",")
 	if len(Langs) == 0 {
 		Langs = []string{
 			"en-US", "zh-CN", "zh-HK", "zh-TW", "de-DE", "fr-FR", "nl-NL", "lv-LV",
 			"ru-RU", "uk-UA", "ja-JP", "es-ES", "pt-BR", "pt-PT", "pl-PL", "bg-BG",
-			"it-IT", "fi-FI", "tr-TR", "cs-CZ", "sr-SP", "sv-SE", "ko-KR"}
+			"it-IT", "fi-FI", "tr-TR", "cs-CZ", "sr-SP", "sv-SE", "ko-KR", "el-GR",
+			"fa-IR", "hu-HU", "id-ID", "ml-IN"}
 	}
 	Names = Cfg.Section("i18n").Key("NAMES").Strings(",")
 	if len(Names) == 0 {
 		Names = []string{"English", "简体中文", "繁體中文（香港）", "繁體中文（台灣）", "Deutsch",
 			"français", "Nederlands", "latviešu", "русский", "Українська", "日本語",
 			"español", "português do Brasil", "Português de Portugal", "polski", "български",
-			"italiano", "suomi", "Türkçe", "čeština", "српски", "svenska", "한국어"}
+			"italiano", "suomi", "Türkçe", "čeština", "српски", "svenska", "한국어", "ελληνικά",
+			"فارسی", "magyar nyelv", "bahasa Indonesia", "മലയാളം"}
 	}
 
 	ShowFooterBranding = Cfg.Section("other").Key("SHOW_FOOTER_BRANDING").MustBool(false)
@@ -994,6 +989,10 @@ func NewContext() {
 	UI.ReactionsMap = make(map[string]bool)
 	for _, reaction := range UI.Reactions {
 		UI.ReactionsMap[reaction] = true
+	}
+	UI.CustomEmojisMap = make(map[string]string)
+	for _, emoji := range UI.CustomEmojis {
+		UI.CustomEmojisMap[emoji] = ":" + emoji + ":"
 	}
 }
 
@@ -1046,7 +1045,7 @@ func loadInternalToken(sec *ini.Section) string {
 		}
 		defer fp.Close()
 
-		buf, err := ioutil.ReadAll(fp)
+		buf, err := io.ReadAll(fp)
 		if err != nil {
 			log.Fatal("Failed to read InternalTokenURI (%s): %v", uri, err)
 		}
@@ -1079,26 +1078,9 @@ func loadOrGenerateInternalToken(sec *ini.Section) string {
 		}
 
 		// Save secret
-		cfgSave := ini.Empty()
-		isFile, err := util.IsFile(CustomConf)
-		if err != nil {
-			log.Error("Unable to check if %s is a file. Error: %v", CustomConf, err)
-		}
-		if isFile {
-			// Keeps custom settings if there is already something.
-			if err := cfgSave.Append(CustomConf); err != nil {
-				log.Error("Failed to load custom conf '%s': %v", CustomConf, err)
-			}
-		}
-
-		cfgSave.Section("security").Key("INTERNAL_TOKEN").SetValue(token)
-
-		if err := os.MkdirAll(filepath.Dir(CustomConf), os.ModePerm); err != nil {
-			log.Fatal("Failed to create '%s': %v", CustomConf, err)
-		}
-		if err := cfgSave.SaveTo(CustomConf); err != nil {
-			log.Fatal("Error saving generated INTERNAL_TOKEN to custom config: %v", err)
-		}
+		CreateOrAppendToCustomConf(func(cfg *ini.File) {
+			cfg.Section("security").Key("INTERNAL_TOKEN").SetValue(token)
+		})
 	}
 	return token
 }
@@ -1137,19 +1119,18 @@ func MakeManifestData(appName string, appURL string, absoluteAssetURL string) []
 		Icons     []manifestIcon `json:"icons"`
 	}
 
-	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	bytes, err := json.Marshal(&manifestJSON{
 		Name:      appName,
 		ShortName: appName,
 		StartURL:  appURL,
 		Icons: []manifestIcon{
 			{
-				Src:   absoluteAssetURL + "/img/logo.png",
+				Src:   absoluteAssetURL + "/assets/img/logo.png",
 				Type:  "image/png",
 				Sizes: "512x512",
 			},
 			{
-				Src:   absoluteAssetURL + "/img/logo.svg",
+				Src:   absoluteAssetURL + "/assets/img/logo.svg",
 				Type:  "image/svg+xml",
 				Sizes: "512x512",
 			},
@@ -1164,10 +1145,50 @@ func MakeManifestData(appName string, appURL string, absoluteAssetURL string) []
 	return bytes
 }
 
+// CreateOrAppendToCustomConf creates or updates the custom config.
+// Use the callback to set individual values.
+func CreateOrAppendToCustomConf(callback func(cfg *ini.File)) {
+	cfg := ini.Empty()
+	isFile, err := util.IsFile(CustomConf)
+	if err != nil {
+		log.Error("Unable to check if %s is a file. Error: %v", CustomConf, err)
+	}
+	if isFile {
+		if err := cfg.Append(CustomConf); err != nil {
+			log.Error("failed to load custom conf %s: %v", CustomConf, err)
+			return
+		}
+	}
+
+	callback(cfg)
+
+	if err := os.MkdirAll(filepath.Dir(CustomConf), os.ModePerm); err != nil {
+		log.Fatal("failed to create '%s': %v", CustomConf, err)
+		return
+	}
+	if err := cfg.SaveTo(CustomConf); err != nil {
+		log.Fatal("error saving to custom config: %v", err)
+	}
+
+	// Change permissions to be more restrictive
+	fi, err := os.Stat(CustomConf)
+	if err != nil {
+		log.Error("Failed to determine current conf file permissions: %v", err)
+		return
+	}
+
+	if fi.Mode().Perm() > 0o600 {
+		if err = os.Chmod(CustomConf, 0o600); err != nil {
+			log.Warn("Failed changing conf file permissions to -rw-------. Consider changing them manually.")
+		}
+	}
+}
+
 // NewServices initializes the services
 func NewServices() {
 	InitDBConfig()
 	newService()
+	newOAuth2Client()
 	NewLogServices(false)
 	newCacheService()
 	newSessionService()
@@ -1175,10 +1196,19 @@ func NewServices() {
 	newMailService()
 	newRegisterMailService()
 	newNotifyMailService()
+	newProxyService()
 	newWebhookService()
 	newMigrationsService()
 	newIndexerService()
 	newTaskService()
 	NewQueueService()
 	newProject()
+	newMimeTypeMap()
+	newFederationService()
+}
+
+// NewServicesForInstall initializes the services for install
+func NewServicesForInstall() {
+	newService()
+	newMailService()
 }

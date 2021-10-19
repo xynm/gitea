@@ -18,7 +18,6 @@ import (
 	"code.gitea.io/gitea/modules/log"
 	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/storage"
 	"code.gitea.io/gitea/modules/structs"
 
 	stdcharset "golang.org/x/net/html/charset"
@@ -70,30 +69,29 @@ func detectEncodingAndBOM(entry *git.TreeEntry, repo *models.Repository) (string
 	buf = buf[:n]
 
 	if setting.LFS.StartServer {
-		meta := lfs.IsPointerFile(&buf)
-		if meta != nil {
-			meta, err = repo.GetLFSMetaObjectByOid(meta.Oid)
+		pointer, _ := lfs.ReadPointerFromBuffer(buf)
+		if pointer.IsValid() {
+			meta, err := repo.GetLFSMetaObjectByOid(pointer.Oid)
 			if err != nil && err != models.ErrLFSObjectNotExist {
 				// return default
 				return "UTF-8", false
 			}
-		}
-		if meta != nil {
-			dataRc, err := lfs.ReadMetaObject(meta)
-			if err != nil {
-				// return default
-				return "UTF-8", false
+			if meta != nil {
+				dataRc, err := lfs.ReadMetaObject(pointer)
+				if err != nil {
+					// return default
+					return "UTF-8", false
+				}
+				defer dataRc.Close()
+				buf = make([]byte, 1024)
+				n, err = dataRc.Read(buf)
+				if err != nil {
+					// return default
+					return "UTF-8", false
+				}
+				buf = buf[:n]
 			}
-			defer dataRc.Close()
-			buf = make([]byte, 1024)
-			n, err = dataRc.Read(buf)
-			if err != nil {
-				// return default
-				return "UTF-8", false
-			}
-			buf = buf[:n]
 		}
-
 	}
 
 	encoding, err := charset.DetectEncoding(buf)
@@ -150,37 +148,8 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 		if err != nil && !git.IsErrBranchNotExist(err) {
 			return nil, err
 		}
-	} else {
-		protectedBranch, err := repo.GetBranchProtection(opts.OldBranch)
-		if err != nil {
-			return nil, err
-		}
-		if protectedBranch != nil {
-			if !protectedBranch.CanUserPush(doer.ID) {
-				return nil, models.ErrUserCannotCommit{
-					UserName: doer.LowerName,
-				}
-			}
-			if protectedBranch.RequireSignedCommits {
-				_, _, _, err := repo.SignCRUDAction(doer, repo.RepoPath(), opts.OldBranch)
-				if err != nil {
-					if !models.IsErrWontSign(err) {
-						return nil, err
-					}
-					return nil, models.ErrUserCannotCommit{
-						UserName: doer.LowerName,
-					}
-				}
-			}
-			patterns := protectedBranch.GetProtectedFilePatterns()
-			for _, pat := range patterns {
-				if pat.Match(strings.ToLower(opts.TreePath)) {
-					return nil, models.ErrFilePathProtected{
-						Path: opts.TreePath,
-					}
-				}
-			}
-		}
+	} else if err := VerifyBranchProtection(repo, doer, opts.OldBranch, opts.TreePath); err != nil {
+		return nil, err
 	}
 
 	// If FromTreePath is not set, set it to the opts.TreePath
@@ -387,12 +356,12 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 
 		if filename2attribute2info[treePath] != nil && filename2attribute2info[treePath]["filter"] == "lfs" {
 			// OK so we are supposed to LFS this data!
-			oid, err := models.GenerateLFSOid(strings.NewReader(opts.Content))
+			pointer, err := lfs.GeneratePointer(strings.NewReader(opts.Content))
 			if err != nil {
 				return nil, err
 			}
-			lfsMetaObject = &models.LFSMetaObject{Oid: oid, Size: int64(len(opts.Content)), RepositoryID: repo.ID}
-			content = lfsMetaObject.Pointer()
+			lfsMetaObject = &models.LFSMetaObject{Pointer: pointer, RepositoryID: repo.ID}
+			content = pointer.StringContent()
 		}
 	}
 	// Add the object to the database
@@ -435,13 +404,13 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 		if err != nil {
 			return nil, err
 		}
-		contentStore := &lfs.ContentStore{ObjectStorage: storage.LFS}
-		exist, err := contentStore.Exists(lfsMetaObject)
+		contentStore := lfs.NewContentStore()
+		exist, err := contentStore.Exists(lfsMetaObject.Pointer)
 		if err != nil {
 			return nil, err
 		}
 		if !exist {
-			if err := contentStore.Put(lfsMetaObject, strings.NewReader(opts.Content)); err != nil {
+			if err := contentStore.Put(lfsMetaObject.Pointer, strings.NewReader(opts.Content)); err != nil {
 				if _, err2 := repo.RemoveLFSMetaObjectByOid(lfsMetaObject.Oid); err2 != nil {
 					return nil, fmt.Errorf("Error whilst removing failed inserted LFS object %s: %v (Prev Error: %v)", lfsMetaObject.Oid, err2, err)
 				}
@@ -466,4 +435,44 @@ func CreateOrUpdateRepoFile(repo *models.Repository, doer *models.User, opts *Up
 		return nil, err
 	}
 	return file, nil
+}
+
+// VerifyBranchProtection verify the branch protection for modifying the given treePath on the given branch
+func VerifyBranchProtection(repo *models.Repository, doer *models.User, branchName string, treePath string) error {
+	protectedBranch, err := repo.GetBranchProtection(branchName)
+	if err != nil {
+		return err
+	}
+	if protectedBranch != nil {
+		isUnprotectedFile := false
+		glob := protectedBranch.GetUnprotectedFilePatterns()
+		if len(glob) != 0 {
+			isUnprotectedFile = protectedBranch.IsUnprotectedFile(glob, treePath)
+		}
+		if !protectedBranch.CanUserPush(doer.ID) && !isUnprotectedFile {
+			return models.ErrUserCannotCommit{
+				UserName: doer.LowerName,
+			}
+		}
+		if protectedBranch.RequireSignedCommits {
+			_, _, _, err := repo.SignCRUDAction(doer, repo.RepoPath(), branchName)
+			if err != nil {
+				if !models.IsErrWontSign(err) {
+					return err
+				}
+				return models.ErrUserCannotCommit{
+					UserName: doer.LowerName,
+				}
+			}
+		}
+		patterns := protectedBranch.GetProtectedFilePatterns()
+		for _, pat := range patterns {
+			if pat.Match(strings.ToLower(treePath)) {
+				return models.ErrFilePathProtected{
+					Path: treePath,
+				}
+			}
+		}
+	}
+	return nil
 }

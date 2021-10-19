@@ -9,6 +9,11 @@ export async function initStopwatch() {
   }
 
   const stopwatchEl = $('.active-stopwatch-trigger');
+
+  if (!stopwatchEl.length) {
+    return;
+  }
+
   stopwatchEl.removeAttr('href'); // intended for noscript mode only
   stopwatchEl.popup({
     position: 'bottom right',
@@ -20,19 +25,15 @@ export async function initStopwatch() {
     $(this).parent().trigger('submit');
   });
 
-  if (!stopwatchEl) {
-    return;
-  }
-
   if (NotificationSettings.EventSourceUpdateTime > 0 && !!window.EventSource && window.SharedWorker) {
     // Try to connect to the event source via the shared worker first
     const worker = new SharedWorker(`${__webpack_public_path__}js/eventsource.sharedworker.js`, 'notification-worker');
     worker.addEventListener('error', (event) => {
       console.error(event);
     });
-    worker.port.onmessageerror = () => {
+    worker.port.addEventListener('messageerror', () => {
       console.error('Unable to deserialize message');
-    };
+    });
     worker.port.postMessage({
       type: 'start',
       url: `${window.location.origin}${AppSubUrl}/user/events`,
@@ -47,7 +48,7 @@ export async function initStopwatch() {
       } else if (event.data.type === 'error') {
         console.error(event.data);
       } else if (event.data.type === 'logout') {
-        if (event.data !== 'here') {
+        if (event.data.data !== 'here') {
           return;
         }
         worker.port.postMessage({
@@ -55,6 +56,11 @@ export async function initStopwatch() {
         });
         worker.port.close();
         window.location.href = AppSubUrl;
+      } else if (event.data.type === 'close') {
+        worker.port.postMessage({
+          type: 'close',
+        });
+        worker.port.close();
       }
     });
     worker.port.addEventListener('error', (e) => {

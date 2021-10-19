@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"code.gitea.io/gitea/modules/log"
@@ -18,10 +19,19 @@ import (
 func runLetsEncrypt(listenAddr, domain, directory, email string, m http.Handler) error {
 
 	// If HTTP Challenge enabled, needs to be serving on port 80. For TLSALPN needs 443.
-	// Due to docker port mapping this can't be checked programatically
+	// Due to docker port mapping this can't be checked programmatically
 	// TODO: these are placeholders until we add options for each in settings with appropriate warning
 	enableHTTPChallenge := true
 	enableTLSALPNChallenge := true
+	altHTTPPort := 0
+	altTLSALPNPort := 0
+
+	if p, err := strconv.Atoi(setting.PortToRedirect); err == nil {
+		altHTTPPort = p
+	}
+	if p, err := strconv.Atoi(setting.HTTPPort); err == nil {
+		altTLSALPNPort = p
+	}
 
 	magic := certmagic.NewDefault()
 	magic.Storage = &certmagic.FileStorage{Path: directory}
@@ -30,9 +40,12 @@ func runLetsEncrypt(listenAddr, domain, directory, email string, m http.Handler)
 		Agreed:                  setting.LetsEncryptTOS,
 		DisableHTTPChallenge:    !enableHTTPChallenge,
 		DisableTLSALPNChallenge: !enableTLSALPNChallenge,
+		ListenHost:              setting.HTTPAddr,
+		AltTLSALPNPort:          altTLSALPNPort,
+		AltHTTPPort:             altHTTPPort,
 	})
 
-	magic.Issuer = myACME
+	magic.Issuers = []certmagic.Issuer{myACME}
 
 	// this obtains certificates or renews them if necessary
 	err := magic.ManageSync([]string{domain})
@@ -41,6 +54,7 @@ func runLetsEncrypt(listenAddr, domain, directory, email string, m http.Handler)
 	}
 
 	tlsConfig := magic.TLSConfig()
+	tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
 
 	if enableHTTPChallenge {
 		go func() {
